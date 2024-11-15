@@ -1,4 +1,5 @@
 import os
+import torch
 
 
 # TODO: very hardcoded and not generic, but works for now (fix later tho)
@@ -19,6 +20,9 @@ def create_dataset_dicts(root_data) -> dict[str, str]:
             )
 
     return data_dicts
+
+
+class Dataset(torch.utils.data.Dataset): ...
 
 
 if __name__ == "__main__":
