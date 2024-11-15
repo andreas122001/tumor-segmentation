@@ -3,6 +3,8 @@ train
 data
 venv
 .venv
+1.2.0
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
