@@ -1,8 +1,11 @@
+import monai.data
 import os
+
+from monai.data import Dataset
 
 
 # TODO: very hardcoded and not generic, but works for now (fix later tho)
-def create_dataset_dicts(root_data) -> dict[str, str]:
+def create_dataset_dicts(root_data) -> list[dict[str, str]]:
     data_dicts = []
     for root, _, files in sorted(os.walk(root_data)):
 
@@ -21,7 +24,11 @@ def create_dataset_dicts(root_data) -> dict[str, str]:
     return data_dicts
 
 
-if __name__ == "__main__":
-    root_data = "data/train"
-    data_dicts = create_dataset_dicts(root_data)
-    print(data_dicts)
+class HNTSDataset(Dataset):
+    def __init__(self, root, transform):
+        super().__init__()
+        index = create_dataset_dicts(root)
+        self.data = Dataset(index, )
+
+    def __getitem__(self, item):
+        ...
