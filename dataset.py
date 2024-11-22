@@ -29,6 +29,13 @@ class HNTSDataset(Dataset):
         super().__init__()
         index = create_dataset_dicts(root)
         self.data = Dataset(index, )
+        self.load_transform = Compose([
+        # Load data
+        LoadImaged(keys=["image", "mask"]),
+        SelectItemsd(keys=["image", "mask"]),
+        ConvertLabelIdToChannel(keys="mask"),
+        EnsureChannelFirstd(keys=["image"]),
+    ])
 
     def __getitem__(self, item):
         ...

@@ -117,26 +117,26 @@ data_dicts_test = create_dataset_dicts("data/test")
 test_dataset = Dataset(data_dicts_test, test_transforms)
 
 # Create model
-model = monai.networks.nets.SwinUNETR(
+model = monai.networks.nets.SegResNet(
+    blocks_down=[1, 2, 2, 4],
+    blocks_up=[1, 1, 1],
+    init_filters=16,
     in_channels=1,
     out_channels=2,
-    img_size=(256,256,96),
-    spatial_dims=3,
-    use_checkpoint=False,
-    use_v2=True,
+    dropout_prob=0.2,
 ).to(device)
 if os.path.isfile("logs/model.pth"):
     model.load_state_dict(torch.load("logs/model.pth"))
 model = model.to(device)
 
 batch_size = 1
-epochs = 100
+epochs = 50
 
 loader = DataLoader(train_dataset, batch_size=batch_size)
 
 # Training loop
 losses = []
-optimizer = torch.optim.Adam(model.parameters(), 2e-3, weight_decay=1e-5)
+optimizer = torch.optim.Adam(model.parameters(), 1e-2, weight_decay=1e-5)
 loss_function = monai.losses.DiceLoss(
     smooth_nr=0,
     smooth_dr=1e-5,
@@ -145,12 +145,11 @@ loss_function = monai.losses.DiceLoss(
     sigmoid=True,
     # weight=torch.tensor([1.1886071e+00, 8.6305177e-01]).to(device)
 )
-lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=5e-5)
 writer = SummaryWriter("logs/writer")
 
 step = 0
 try:
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
     for e in range(epochs):
         print(f"Epoch: {e+1}/{epochs}")
         time.sleep(0.1)
