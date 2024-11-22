@@ -78,6 +78,8 @@ class HNTSDataset(Dataset):
             data = self.transform(data)
         return data
 
+    def __len__(self):
+        return self.index.__len__()
 
 if __name__ == "__main__":
     dataset = HNTSDataset("data/train")
