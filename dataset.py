@@ -1,15 +1,13 @@
-import monai.data
 import os
+
 import torch
+from monai.data import Dataset
 from monai.transforms import (
     Compose,
     MapTransform,
     LoadImaged,
     SelectItemsd,
-    EnsureChannelFirstd,
-)
-
-from monai.data import Dataset
+    EnsureChannelFirstd, Orientationd, Spacingd, )
 
 
 def create_dataset_dicts(root_data) -> list[dict[str, str]]:
@@ -22,8 +20,8 @@ def create_dataset_dicts(root_data) -> list[dict[str, str]]:
             imag = [f for f in files if "_preRT_T2.nii.gz" in f][0]
             data_dicts.append(
                 {
-                    "image": os.path.join(root, imag),
-                    "mask": os.path.join(root, mask),
+                    "image": str(os.path.join(root, imag)),
+                    "mask": str(os.path.join(root, mask)),
                 }
             )
 
@@ -38,10 +36,8 @@ class ConvertLabelIdToChannel(MapTransform):
     def __call__(self, data):
         d = dict(data)
         for key in self.keys:
-            result = []
-            result.append(d[key] == 1)
-            result.append(d[key] == 2)
-            d[key] = torch.stack(result, axis=0).float()
+            result = [d[key] == 1, d[key] == 2]
+            d[key] = torch.stack(result, dim=0).float()
         return d
 
 
@@ -67,6 +63,12 @@ class HNTSDataset(Dataset):
                 SelectItemsd(keys=["image", "mask"]),
                 ConvertLabelIdToChannel(keys="mask"),
                 EnsureChannelFirstd(keys=["image"]),
+                Orientationd(keys=["image", "mask"], axcodes="RAS"),
+                Spacingd(
+                    keys=["image", "mask"],
+                    pixdim=(1.0, 1.0, 1.0),  # from image metadata, isotropic spacing
+                    mode=("bilinear", "nearest")
+                ),
             ]
         )
 
