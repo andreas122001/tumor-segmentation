@@ -4,17 +4,27 @@ import torch
 import numpy as np
 import pytorch_lightning as pl
 from torch.nn.modules.module import T
+from tqdm import tqdm
+
+from torch.utils.tensorboard import SummaryWriter
+
+class VoidWriter(SummaryWriter):
+    def __init__():
+        ...
 
 
 class MedSegTrainer:
 
-    def __init__(self,
-                 epochs,
-                 loss_f,
-                 optimizer,
-                 lr_scheduler=None,
-                 ) -> None:
+    def __init__(
+        self,
+        epochs,
+        loss_f,
+        optimizer,
+        lr_scheduler=None,
+        logger=VoidWriter()
+    ) -> None:
         super().__init__()
+        self.epochs = epochs
         self.optimizer = optimizer
         self.loss_f = loss_f
         self.lr_scheduler = lr_scheduler
@@ -22,38 +32,31 @@ class MedSegTrainer:
 
     @staticmethod
     def _unpack_batch(batch):
-        return batch['image'], batch['mask']
+        return batch["image"], batch["mask"]
 
     def fit(self, model, train_loader):
-        ...
+        for e in range(self.epochs):
+            print(f"Epoch {e}/{self.epochs}")
+            for batch in tqdm(train_loader, desc="Training step", leave=False):
+                loss = self.training_step(model, batch)
+            self.lr_scheduler.step()
 
-    def training_step(self, batch, batch_idx, dataloader_idx):
+    def training_step(self, model, batch):
+        self.optimizer.zero_grad()
         inputs, targets = self._unpack_batch(batch)
 
-        logits = self.forward(inputs)
+        logits = model(inputs)
         loss = self.loss_f(logits, targets)
+        loss.backward()
+        self.optimizer.step()
 
-        # Logging
-        self.log("loss", loss.item())
         self.step += 1
-
         return loss.item()
-
-    def forward(self, x):
-        logits = self.model(x)
-        return logits
-
-    def validation_step(
-            self, batch, batch_idx, dataloader_idx
-    ) -> torch.Tensor | np.Mapping[str, Any] | None:
-        return super().validation_step(batch, batch_idx, dataloader_idx)
 
 
 def main():
     trainer = MedSegTrainer()
 
-    trainer.fit
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

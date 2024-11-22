@@ -1,7 +1,6 @@
 import os.path
 import warnings
 
-warnings.filterwarnings('ignore', category=DeprecationWarning)
 import monai.visualize
 
 import matplotlib.pyplot as plt
@@ -10,31 +9,17 @@ from monai.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from config import Config
-from data import create_dataset_dicts
-from monai.data import Dataset
 from monai.transforms import (
-    LoadImaged,
-    EnsureChannelFirstd,
-    ScaleIntensityd,
-    RandCropByPosNegLabeld,
-    RandRotate90d,
     Compose,
     Resized,
     Spacingd,
-    ToTensord,
-    SpatialPadd,
     SpatialCropd,
     ToDeviced,
-    SelectItemsd,
     NormalizeIntensityd,
-    AsDiscreted,
     RandSpatialCropd,
     RandFlipd,
     RandScaleIntensityd,
     RandShiftIntensityd,
-    MapTransform,
-    AsDiscreted,
     Activations,
     AsDiscrete,
     Orientationd,
@@ -45,31 +30,20 @@ import time
 import numpy as np
 from scipy.signal import savgol_filter
 from monai.metrics import DiceMetric
-from monai.handlers import CheckpointSaver
+from dataset import HNTSDataset
 
+experiment_id = "exp1"
 device = "cuda"
-
-class ConvertLabelIdToChannel(MapTransform):
-    def __call__(self, data):
-        d = dict(data)
-        for key in self.keys:
-            result = []
-            result.append(d[key] == 1)
-            result.append(d[key] == 2)
-            d[key] = torch.stack(result, axis=0).float()
-        return d
-
+batch_size = 1
+epochs = 50
+lr_init = 1e-2
+lr_min = 1e-5
+weight_decay = 1e-5
+os.makedirs(f"logs/{experiment_id}", exist_ok=True)
 
 # Train data
-data_dicts = create_dataset_dicts("data/train")
 train_transforms = Compose(
     [
-        # Load data
-        LoadImaged(keys=["image", "mask"]),
-        SelectItemsd(keys=["image", "mask"]),
-        ConvertLabelIdToChannel(keys="mask"),
-        EnsureChannelFirstd(keys=["image"]),
-
         # Normalization and cropping
         Orientationd(keys=["image", "mask"], axcodes="RAS"),
         Spacingd(
@@ -77,44 +51,41 @@ train_transforms = Compose(
             pixdim=(1.0, 1.0, 1.0),
             mode=("bilinear", "nearest"),
         ),
-        RandSpatialCropd(keys=["image", "mask"], roi_size=[256, 256, 96], random_size=False),
-        # SpatialCropd(keys=["image", "mask"], roi_center=[256,256,40], roi_size=[196, 196, 80]),
-        RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=0),
-        RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=1),
-        RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=2),
-
-        NormalizeIntensityd(keys="image", nonzero=True),
-        RandScaleIntensityd(keys="image", factors=0.1, prob=1.0),
-        RandShiftIntensityd(keys="image", offsets=0.1, prob=1.0),
-
-        # Ensure correct size
+        RandSpatialCropd(
+            keys=["image", "mask"], roi_size=[256, 256, 96], random_size=False
+        ),
         Resized(
             keys=["image", "mask"],
             spatial_size=(256, 256, 96),
             mode=("bilinear", "nearest"),
         ),
+        RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=0),
+        RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=1),
+        RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=2),
+        NormalizeIntensityd(keys="image", nonzero=True),
+        RandScaleIntensityd(keys="image", factors=0.1, prob=1.0),
+        RandShiftIntensityd(keys="image", offsets=0.1, prob=1.0),
     ]
 )
-train_dataset = Dataset(data_dicts, train_transforms)
+train_dataset = HNTSDataset("data/train", transform=train_transforms)
+
 
 # Test data
 test_transforms = Compose(
     [
-        # Load data
-        LoadImaged(keys=["image", "mask"]),
-        SelectItemsd(keys=["image", "mask"]),
-        ConvertLabelIdToChannel(keys="mask"),
-        EnsureChannelFirstd(keys=["image"]),
-
-        # Normalization and resizing
-        SpatialCropd(keys=["image", "mask"], roi_center=[256,256,40], roi_size=[256, 256, 96]),
+        # Normalization
+        SpatialCropd(
+            keys=["image", "mask"], roi_center=[256, 256, 40], roi_size=[256, 256, 96]
+        ),
+        Resized(
+            keys=["image", "mask"],
+            spatial_size=(256, 256, 96),
+            mode=("bilinear", "nearest"),
+        ),
         NormalizeIntensityd(keys="image"),
-        Resized(keys=["image", "mask"], spatial_size=(256, 256, 96), mode=("bilinear", "nearest")),
-        ToDeviced(keys=["image", "mask"], device=device),
     ]
 )
-data_dicts_test = create_dataset_dicts("data/test")
-test_dataset = Dataset(data_dicts_test, test_transforms)
+test_dataset = HNTSDataset("data/test", transform=test_transforms)
 
 # Create model
 model = monai.networks.nets.SegResNet(
@@ -125,28 +96,29 @@ model = monai.networks.nets.SegResNet(
     out_channels=2,
     dropout_prob=0.2,
 ).to(device)
-if os.path.isfile("logs/model.pth"):
-    model.load_state_dict(torch.load("logs/model.pth"))
+if os.path.isfile(f"logs/{experiment_id}/model.pth"):
+    model.load_state_dict(torch.load(f"logs/{experiment_id}/model.pth"))
 model = model.to(device)
 
-batch_size = 1
-epochs = 50
+
 
 loader = DataLoader(train_dataset, batch_size=batch_size)
 
 # Training loop
 losses = []
-optimizer = torch.optim.Adam(model.parameters(), 1e-2, weight_decay=1e-5)
+optimizer = torch.optim.Adam(model.parameters(), lr_init, weight_decay=weight_decay)
 loss_function = monai.losses.DiceLoss(
     smooth_nr=0,
     smooth_dr=1e-5,
     squared_pred=True,
-    to_onehot_y=False, # False
+    to_onehot_y=False,  # False
     sigmoid=True,
     # weight=torch.tensor([1.1886071e+00, 8.6305177e-01]).to(device)
 )
-lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=5e-5)
-writer = SummaryWriter("logs/writer")
+lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, T_max=epochs, eta_min=5e-5
+)
+writer = SummaryWriter(f"logs/{experiment_id}/writer")
 
 step = 0
 try:
@@ -155,7 +127,7 @@ try:
         time.sleep(0.1)
         model.train()
         for batch in tqdm(loader, desc="Training step"):
-            inputs, labels = batch['image'].to(device), batch['mask'].to(device)
+            inputs, labels = batch["image"].to(device), batch["mask"].to(device)
             optimizer.zero_grad()
             preds = model(inputs)
             loss = loss_function(preds, labels)
@@ -163,7 +135,7 @@ try:
             optimizer.step()
 
             losses.append(loss.item())
-        lr_scheduler.step(e)
+        lr_scheduler.step()
         print(f"Loss: {np.mean(losses[-130:])}")
         step += 1
 except KeyboardInterrupt:
@@ -180,16 +152,17 @@ if epochs > 0:
     plt.title("Training loss")
     plt.xlabel("Training step")
     plt.ylabel("Dice loss")
-    plt.savefig("logs/loss.png")
+    plt.savefig(f"logs/{experiment_id}/loss.png")
 
 # Test metric
 from monai.metrics import DiceMetric
+
 post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
 
 dice_metric = DiceMetric(include_background=True, reduction="mean_batch")
 test_loader = DataLoader(test_dataset, batch_size=1)
 for batch in tqdm(test_loader, desc="Testing steps"):
-    inputs, labels = batch['image'], batch['mask']
+    inputs, labels = batch["image"].to(device), batch["mask"].to(device)
 
     logits = model(inputs)
     preds = post_trans(logits)
@@ -201,22 +174,33 @@ print(f"Dice score 1: {dice_score[1]:.3f}")
 dice_metric.reset()
 
 # Visualization
-
 idx = 0
 sample = test_dataset[idx]
 
-pred = post_trans(model(sample['image'].unsqueeze(0))).cpu()
-pred = torch.stack([torch.zeros(pred.shape[2:]), pred[0,0], pred[0,1]], axis=0)[:,:,:,:].sum(-1).transpose(0,2).transpose(0,1)
-mask = sample['mask'].cpu()
-mask = torch.stack([torch.zeros(mask.shape[1:]), mask[0], mask[1]], axis=0)[:,:,:,:].sum(-1).transpose(0,2).transpose(0,1)
+pred = post_trans(model(sample["image"].unsqueeze(0))).cpu()
+pred = (
+    torch.stack([torch.zeros(pred.shape[2:]), pred[0, 0], pred[0, 1]], axis=0)[
+        :, :, :, :
+    ]
+    .sum(-1)
+    .transpose(0, 2)
+    .transpose(0, 1)
+)
+mask = sample["mask"].cpu()
+mask = (
+    torch.stack([torch.zeros(mask.shape[1:]), mask[0], mask[1]], axis=0)[:, :, :, :]
+    .sum(-1)
+    .transpose(0, 2)
+    .transpose(0, 1)
+)
 
 fig, axs = plt.subplots(2, 2, figsize=(8, 8))
-[[a.axis('off') for a in ax] for ax in axs]
+[[a.axis("off") for a in ax] for ax in axs]
 for row in range(len(axs)):
-    axs[row][0].imshow(pred[:,:,row], cmap='Reds')
-    axs[row][1].imshow(mask[:,:,row], cmap='Reds')
+    axs[row][0].imshow(pred[:, :, row], cmap="Reds")
+    axs[row][1].imshow(mask[:, :, row], cmap="Reds")
 fig.suptitle("Pred. vs mask")
 fig.tight_layout()
-plt.savefig("logs/pred_vs_target.png")
+plt.savefig(f"logs/{experiment_id}/lpred_vs_target.png")
 
-torch.save(model.state_dict(), "logs/model.pth")
+torch.save(model.state_dict(), f"logs/{experiment_id}/lmodel.pth")
