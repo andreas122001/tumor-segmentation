@@ -4,6 +4,7 @@ data
 venv
 .venv
 1.2.0
+logs
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

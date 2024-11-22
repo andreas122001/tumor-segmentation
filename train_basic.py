@@ -16,12 +16,28 @@ from monai.data import Dataset
 from monai.transforms import (
     LoadImaged,
     EnsureChannelFirstd,
+    ScaleIntensityd,
+    RandCropByPosNegLabeld,
     RandRotate90d,
     Compose,
     Resized,
+    Spacingd,
+    ToTensord,
+    SpatialPadd,
+    SpatialCropd,
     ToDeviced,
     SelectItemsd,
     NormalizeIntensityd,
+    AsDiscreted,
+    RandSpatialCropd,
+    RandFlipd,
+    RandScaleIntensityd,
+    RandShiftIntensityd,
+    MapTransform,
+    AsDiscreted,
+    Activations,
+    AsDiscrete,
+    Orientationd,
 )
 
 import torch
@@ -33,8 +49,16 @@ from monai.handlers import CheckpointSaver
 
 device = "cuda"
 
-# image: (1, 256, 256, 80)
-# mask: (1, 256, 256, 80)
+class ConvertLabelIdToChannel(MapTransform):
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.keys:
+            result = []
+            result.append(d[key] == 1)
+            result.append(d[key] == 2)
+            d[key] = torch.stack(result, axis=0).float()
+        return d
+
 
 # Train data
 data_dicts = create_dataset_dicts("data/train")
@@ -43,16 +67,32 @@ train_transforms = Compose(
         # Load data
         LoadImaged(keys=["image", "mask"]),
         SelectItemsd(keys=["image", "mask"]),
-        EnsureChannelFirstd(keys=["image", "mask"]),
-        # Normalization and resizing
-        NormalizeIntensityd(keys="image"),
-        Resized(
+        ConvertLabelIdToChannel(keys="mask"),
+        EnsureChannelFirstd(keys=["image"]),
+
+        # Normalization and cropping
+        Orientationd(keys=["image", "mask"], axcodes="RAS"),
+        Spacingd(
             keys=["image", "mask"],
-            spatial_size=(256, 256, 80),
+            pixdim=(1.0, 1.0, 1.0),
             mode=("bilinear", "nearest"),
         ),
-        RandRotate90d(keys=["image", "mask"], prob=0.5, spatial_axes=(0, 1)),
-        ToDeviced(keys=["image", "mask"], device=device),
+        RandSpatialCropd(keys=["image", "mask"], roi_size=[256, 256, 96], random_size=False),
+        # SpatialCropd(keys=["image", "mask"], roi_center=[256,256,40], roi_size=[196, 196, 80]),
+        RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=0),
+        RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=1),
+        RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=2),
+
+        NormalizeIntensityd(keys="image", nonzero=True),
+        RandScaleIntensityd(keys="image", factors=0.1, prob=1.0),
+        RandShiftIntensityd(keys="image", offsets=0.1, prob=1.0),
+
+        # Ensure correct size
+        Resized(
+            keys=["image", "mask"],
+            spatial_size=(256, 256, 96),
+            mode=("bilinear", "nearest"),
+        ),
     ]
 )
 train_dataset = Dataset(data_dicts, train_transforms)
@@ -63,73 +103,70 @@ test_transforms = Compose(
         # Load data
         LoadImaged(keys=["image", "mask"]),
         SelectItemsd(keys=["image", "mask"]),
-        EnsureChannelFirstd(keys=["image", "mask"]),
-        # Ensure correct size
-        Resized(
-            keys=["image", "mask"],
-            spatial_size=(256, 256, 80),
-            mode=("bilinear", "nearest"),
-        ),
+        ConvertLabelIdToChannel(keys="mask"),
+        EnsureChannelFirstd(keys=["image"]),
+
+        # Normalization and resizing
+        SpatialCropd(keys=["image", "mask"], roi_center=[256,256,40], roi_size=[256, 256, 96]),
+        NormalizeIntensityd(keys="image"),
+        Resized(keys=["image", "mask"], spatial_size=(256, 256, 96), mode=("bilinear", "nearest")),
+        ToDeviced(keys=["image", "mask"], device=device),
     ]
 )
 data_dicts_test = create_dataset_dicts("data/test")
 test_dataset = Dataset(data_dicts_test, test_transforms)
 
 # Create model
-model = monai.networks.nets.UNet(
-    spatial_dims=3,
+model = monai.networks.nets.SwinUNETR(
     in_channels=1,
-    out_channels=3,
-    channels=(32, 64, 128, 128),
-    strides=(2, 2, 2),
-    num_res_units=2,
-)
+    out_channels=2,
+    img_size=(256,256,96),
+    spatial_dims=3,
+    use_checkpoint=False,
+    use_v2=True,
+).to(device)
 if os.path.isfile("logs/model.pth"):
     model.load_state_dict(torch.load("logs/model.pth"))
 model = model.to(device)
 
 batch_size = 1
-epochs = 20
+epochs = 100
 
 loader = DataLoader(train_dataset, batch_size=batch_size)
 
 # Training loop
 losses = []
-optimizer = torch.optim.Adam(model.parameters(), 5e-5, weight_decay=1e-5)
-loss_function = monai.losses.DiceCELoss(
-    include_background=True, to_onehot_y=True,
-    weight=torch.tensor([3.3394375e-01, 4.3348691e+02, 3.1475632e+02]).to(device)
+optimizer = torch.optim.Adam(model.parameters(), 2e-3, weight_decay=1e-5)
+loss_function = monai.losses.DiceLoss(
+    smooth_nr=0,
+    smooth_dr=1e-5,
+    squared_pred=True,
+    to_onehot_y=False, # False
+    sigmoid=True,
+    # weight=torch.tensor([1.1886071e+00, 8.6305177e-01]).to(device)
 )
-lr_scheduler = monai.optimizers.lr_scheduler.WarmupCosineSchedule(optimizer, warmup_steps=5, t_total=epochs)
+lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 writer = SummaryWriter("logs/writer")
-checkpoint = CheckpointSaver("logs",
-                             save_dict={
-                                 'network': model,
-                                 'optimizer': optimizer,
-                                 'lr_scheduler': lr_scheduler
-                             },
-                             name="model1"
-                             )
+
 step = 0
 try:
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
     for e in range(epochs):
-        print(f"Epoch: {e + 1}/{epochs}")
+        print(f"Epoch: {e+1}/{epochs}")
         time.sleep(0.1)
         model.train()
         for batch in tqdm(loader, desc="Training step"):
-            inputs, labels = batch["image"].to(device), batch["mask"].to(device)
+            inputs, labels = batch['image'].to(device), batch['mask'].to(device)
             optimizer.zero_grad()
             preds = model(inputs)
             loss = loss_function(preds, labels)
             loss.backward()
             optimizer.step()
 
-            writer.add_scalar("train/loss", loss.item(), step)
             losses.append(loss.item())
-            step += 1
-        # writer.add_scalar("learning_rate", lr_scheduler.get_lr())
-        lr_scheduler.step()
-        print(f"Loss: {np.mean(losses[-130:]):.3f}")
+        lr_scheduler.step(e)
+        print(f"Loss: {np.mean(losses[-130:])}")
+        step += 1
 except KeyboardInterrupt:
     print("Stopped training.")
 
@@ -147,35 +184,40 @@ if epochs > 0:
     plt.savefig("logs/loss.png")
 
 # Test metric
-dice_metric = DiceMetric(include_background=True, reduction="mean_batch", num_classes=3)
-test_loader = DataLoader(test_dataset, batch_size=batch_size)
-for batch in tqdm(test_loader, desc="Testing steps"):
-    # inputs.shape: [1, 3, 256, 256, 80]
-    # labels.shape: [1, 1, 256, 256, 80]
-    inputs, labels = batch["image"].to(device), batch["mask"].to(device)
+from monai.metrics import DiceMetric
+post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
 
-    pred = model(inputs)
-    dice_metric(y_pred=pred.argmax(1), y=labels)
+dice_metric = DiceMetric(include_background=True, reduction="mean_batch")
+test_loader = DataLoader(test_dataset, batch_size=1)
+for batch in tqdm(test_loader, desc="Testing steps"):
+    inputs, labels = batch['image'], batch['mask']
+
+    logits = model(inputs)
+    preds = post_trans(logits)
+    dice_metric(y_pred=preds, y=labels)
 
 dice_score = dice_metric.aggregate()
-for i, score in enumerate(dice_score):
-    print(f"Dice score {i}: {score:.4f}")
+print(f"Dice score 0: {dice_score[0]:.3f}")
+print(f"Dice score 1: {dice_score[1]:.3f}")
 dice_metric.reset()
 
 # Visualization
-sample = test_dataset[15]
-pred = model(sample["image"].to(device).unsqueeze(0))
-pred = pred.softmax(1).argmax(1)
-pred = pred.cpu()
 
-monai.visualize.matshow3d(
-    monai.transforms.Orientation("SPL")(pred), every_n=9, figsize=(6, 6)
-)
-plt.savefig("logs/pred.png")
+idx = 0
+sample = test_dataset[idx]
 
-monai.visualize.matshow3d(
-    monai.transforms.Orientation("SPL")(sample["mask"]), every_n=9, figsize=(6, 6)
-)
-plt.savefig("logs/target.png")
+pred = post_trans(model(sample['image'].unsqueeze(0))).cpu()
+pred = torch.stack([torch.zeros(pred.shape[2:]), pred[0,0], pred[0,1]], axis=0)[:,:,:,:].sum(-1).transpose(0,2).transpose(0,1)
+mask = sample['mask'].cpu()
+mask = torch.stack([torch.zeros(mask.shape[1:]), mask[0], mask[1]], axis=0)[:,:,:,:].sum(-1).transpose(0,2).transpose(0,1)
+
+fig, axs = plt.subplots(2, 2, figsize=(8, 8))
+[[a.axis('off') for a in ax] for ax in axs]
+for row in range(len(axs)):
+    axs[row][0].imshow(pred[:,:,row], cmap='Reds')
+    axs[row][1].imshow(mask[:,:,row], cmap='Reds')
+fig.suptitle("Pred. vs mask")
+fig.tight_layout()
+plt.savefig("logs/pred_vs_target.png")
 
 torch.save(model.state_dict(), "logs/model.pth")

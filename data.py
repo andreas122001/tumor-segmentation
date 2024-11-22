@@ -14,7 +14,6 @@ def create_dataset_dicts(root_data) -> dict[str, str]:
                 {
                     "image": os.path.join(root, imag),
                     "mask": os.path.join(root, mask),
-                    "id": root.split("\\")[2],
                 }
             )
 
