@@ -5,7 +5,8 @@ import monai.visualize
 
 import matplotlib.pyplot as plt
 
-from monai.data import DataLoader
+from monai.data import DataLoader, decollate_batch
+from monai.inferers import sliding_window_inference
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -22,7 +23,7 @@ from monai.transforms import (
     RandShiftIntensityd,
     Activations,
     AsDiscrete,
-    Orientationd,
+    Orientationd, CropForegroundd,
 )
 
 import torch
@@ -32,10 +33,10 @@ from scipy.signal import savgol_filter
 from monai.metrics import DiceMetric
 from dataset import HNTSDataset
 
-experiment_id = "exp1"
+experiment_id = "exp2"
 device = "cuda"
 batch_size = 1
-epochs = 50
+epochs = 0
 lr_init = 1e-2
 lr_min = 1e-5
 weight_decay = 1e-5
@@ -45,26 +46,15 @@ os.makedirs(f"logs/{experiment_id}", exist_ok=True)
 train_transforms = Compose(
     [
         # Normalization and cropping
-        Orientationd(keys=["image", "mask"], axcodes="RAS"),
-        Spacingd(
-            keys=["image", "mask"],
-            pixdim=(1.0, 1.0, 1.0),
-            mode=("bilinear", "nearest"),
-        ),
         RandSpatialCropd(
             keys=["image", "mask"], roi_size=[256, 256, 96], random_size=False
-        ),
-        Resized(
-            keys=["image", "mask"],
-            spatial_size=(256, 256, 96),
-            mode=("bilinear", "nearest"),
         ),
         RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=0),
         RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=1),
         RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=2),
         NormalizeIntensityd(keys="image", nonzero=True),
-        RandScaleIntensityd(keys="image", factors=0.1, prob=1.0),
-        RandShiftIntensityd(keys="image", offsets=0.1, prob=1.0),
+        RandScaleIntensityd(keys="image", factors=0.05, prob=1.0),
+        RandShiftIntensityd(keys="image", offsets=0.05, prob=1.0),
     ]
 )
 train_dataset = HNTSDataset("data/train", transform=train_transforms)
@@ -72,15 +62,6 @@ train_dataset = HNTSDataset("data/train", transform=train_transforms)
 # Test data
 test_transforms = Compose(
     [
-        # Normalization
-        SpatialCropd(
-            keys=["image", "mask"], roi_center=[256, 256, 40], roi_size=[256, 256, 96]
-        ),
-        Resized(
-            keys=["image", "mask"],
-            spatial_size=(256, 256, 96),
-            mode=("bilinear", "nearest"),
-        ),
         NormalizeIntensityd(keys="image"),
     ]
 )
@@ -95,6 +76,7 @@ model = monai.networks.nets.SegResNet(
     out_channels=2,
     dropout_prob=0.2,
 ).to(device)
+
 if os.path.isfile(f"logs/{experiment_id}/model.pth"):
     model.load_state_dict(torch.load(f"logs/{experiment_id}/model.pth"))
 model = model.to(device)
@@ -115,7 +97,7 @@ loss_function = monai.losses.DiceLoss(
 lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, T_max=epochs, eta_min=5e-5
 )
-writer = SummaryWriter(f"logs/{experiment_id}/writer")
+writer = SummaryWriter(f"logs/writer/{experiment_id}")
 
 step = 0
 try:
@@ -126,8 +108,9 @@ try:
         for batch in tqdm(loader, desc="Training step"):
             inputs, labels = batch["image"].to(device), batch["mask"].to(device)
             optimizer.zero_grad()
-            preds = model(inputs)
-            loss = loss_function(preds, labels)
+            with torch.amp.autocast('cuda'):
+                preds = model(inputs)
+                loss = loss_function(preds, labels)
             loss.backward()
             optimizer.step()
 
@@ -151,8 +134,21 @@ if epochs > 0:
     plt.ylabel("Dice loss")
     plt.savefig(f"logs/{experiment_id}/loss.png")
 
+
 # Test metric
-from monai.metrics import DiceMetric
+def inference(model, input):
+    def _compute(input):
+        return sliding_window_inference(
+            inputs=input,
+            roi_size=(240, 240, 160),
+            sw_batch_size=1,
+            predictor=model,
+            overlap=0.5,
+        )
+
+    with torch.amp.autocast('cuda'):
+        return _compute(input)
+
 
 post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
 
@@ -160,9 +156,9 @@ dice_metric = DiceMetric(include_background=True, reduction="mean_batch")
 test_loader = DataLoader(test_dataset, batch_size=1)
 for batch in tqdm(test_loader, desc="Testing steps"):
     inputs, labels = batch["image"].to(device), batch["mask"].to(device)
+    preds = inference(model, inputs)
+    preds = [post_trans(i) for i in decollate_batch(preds)]
 
-    logits = model(inputs)
-    preds = post_trans(logits)
     dice_metric(y_pred=preds, y=labels)
 
 dice_score = dice_metric.aggregate()
@@ -174,7 +170,9 @@ dice_metric.reset()
 idx = 0
 sample = test_dataset[idx]
 
-pred = post_trans(model(sample["image"].unsqueeze(0))).cpu()
+pred = inference(model, sample['image'].unsqueeze(0).to(device)).cpu()
+
+pred = post_trans(pred)
 pred = (
     torch.stack([torch.zeros(pred.shape[2:]), pred[0, 0], pred[0, 1]], axis=0)[
     :, :, :, :
@@ -183,7 +181,7 @@ pred = (
     .transpose(0, 2)
     .transpose(0, 1)
 )
-mask = sample["mask"].cpu()
+mask = sample["mask"]
 mask = (
     torch.stack([torch.zeros(mask.shape[1:]), mask[0], mask[1]], axis=0)[:, :, :, :]
     .sum(-1)
@@ -198,6 +196,6 @@ for row in range(len(axs)):
     axs[row][1].imshow(mask[:, :, row], cmap="Reds")
 fig.suptitle("Pred. vs mask")
 fig.tight_layout()
-plt.savefig(f"logs/{experiment_id}/lpred_vs_target.png")
+plt.savefig(f"logs/{experiment_id}/pred_vs_target.png")
 
-torch.save(model.state_dict(), f"logs/{experiment_id}/lmodel.pth")
+torch.save(model.state_dict(), f"logs/{experiment_id}/model.pth")
