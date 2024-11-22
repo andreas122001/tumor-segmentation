@@ -23,7 +23,8 @@ from monai.transforms import (
     RandShiftIntensityd,
     Activations,
     AsDiscrete,
-    Orientationd, CropForegroundd,
+    Orientationd,
+    CropForegroundd,
 )
 
 import torch
@@ -47,7 +48,7 @@ train_transforms = Compose(
     [
         # Normalization and cropping
         RandSpatialCropd(
-            keys=["image", "mask"], roi_size=[256, 256, 96], random_size=False
+            keys=["image", "mask"], roi_size=[224, 224, 96], random_size=False
         ),
         RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=0),
         RandFlipd(keys=["image", "mask"], prob=0.5, spatial_axis=1),
@@ -101,6 +102,7 @@ writer = SummaryWriter(f"logs/writer/{experiment_id}")
 
 step = 0
 try:
+    scaler = torch.amp.GradScaler("cuda")
     for e in range(epochs):
         print(f"Epoch: {e + 1}/{epochs}")
         time.sleep(0.1)
@@ -108,11 +110,12 @@ try:
         for batch in tqdm(loader, desc="Training step"):
             inputs, labels = batch["image"].to(device), batch["mask"].to(device)
             optimizer.zero_grad()
-            with torch.amp.autocast('cuda'):
+            with torch.amp.autocast("cuda"):
                 preds = model(inputs)
                 loss = loss_function(preds, labels)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             losses.append(loss.item())
         lr_scheduler.step()
@@ -136,30 +139,31 @@ if epochs > 0:
 
 
 # Test metric
-def inference(model, input):
-    def _compute(input):
+def inference(model, input_):
+    def _compute(input_):
         return sliding_window_inference(
-            inputs=input,
-            roi_size=(256, 256, 96),
+            inputs=input_,
+            roi_size=(224, 224, 96),
             sw_batch_size=1,
             predictor=model,
             overlap=0.5,
         )
 
-    with torch.amp.autocast('cuda'):
-        return _compute(input)
+    with torch.amp.autocast("cuda"):
+        return _compute(input_)
 
 
+model.eval()
 post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
-
 dice_metric = DiceMetric(include_background=True, reduction="mean_batch")
 test_loader = DataLoader(test_dataset, batch_size=1)
-for batch in tqdm(test_loader, desc="Testing steps"):
-    inputs, labels = batch["image"].to(device), batch["mask"].to(device)
-    preds = inference(model, inputs)
-    preds = [post_trans(i) for i in decollate_batch(preds)]
+with torch.no_grad():
+    for batch in tqdm(test_loader, desc="Testing steps"):
+        inputs, labels = batch["image"].to(device), batch["mask"].to(device)
+        preds = inference(model, inputs)
+        preds = [post_trans(i) for i in decollate_batch(preds)]
 
-    dice_metric(y_pred=preds, y=labels)
+        dice_metric(y_pred=preds, y=labels)
 
 dice_score = dice_metric.aggregate()
 print(f"Dice score 0: {dice_score[0]:.3f}")
@@ -169,13 +173,12 @@ dice_metric.reset()
 # Visualization
 idx = 0
 sample = test_dataset[idx]
-
-pred = inference(model, sample['image'].unsqueeze(0).to(device)).cpu()
-
-pred = post_trans(pred)
+with torch.no_grad():
+    pred = inference(model, sample["image"].unsqueeze(0).to(device)).cpu()
+preds = [post_trans(i) for i in decollate_batch(preds)]
 pred = (
     torch.stack([torch.zeros(pred.shape[2:]), pred[0, 0], pred[0, 1]], axis=0)[
-    :, :, :, :
+        :, :, :, :
     ]
     .sum(-1)
     .transpose(0, 2)
