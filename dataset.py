@@ -1,13 +1,13 @@
 import os
 
 import torch
-from monai.data import Dataset
+from monai.data import CacheDataset
 from monai.transforms import (
     Compose,
     MapTransform,
     LoadImaged,
     SelectItemsd,
-    EnsureChannelFirstd, Orientationd, Spacingd, )
+    EnsureChannelFirstd, Orientationd, Spacingd, Identity, )
 
 
 def create_dataset_dicts(root_data) -> list[dict[str, str]]:
@@ -41,23 +41,15 @@ class ConvertLabelIdToChannel(MapTransform):
         return d
 
 
-class HNTSDataset(Dataset):
+class HNTSDataset(CacheDataset):
     """
-    Loads samples from the HNTSMRG24 dataset.
-    The samples are converted such that each label becomes its own channel, except from the background label (0) which is ignored.
-    GTVp is at channel 0, GTVn at channel 1.
+    Loads samples from the HNTSMRG24 dataset. The samples are converted such that each label becomes its own channel,
+    except from the background label (0) which is ignored. GTVp is at channel 0, GTVn at channel 1.
     """
 
     def __init__(self, root, transform=None):
-        super().__init__(root, transform)
         self.index = create_dataset_dicts(root)
-        self.root = root
-        self.id_to_label = {
-            0: "GTVp",
-            1: "GTVn",
-        }
-        self.transform = transform
-        self.load_transform = Compose(
+        full_transform = Compose(
             [
                 LoadImaged(keys=["image", "mask"]),
                 SelectItemsd(keys=["image", "mask"]),
@@ -69,18 +61,25 @@ class HNTSDataset(Dataset):
                     pixdim=(1.0, 1.0, 1.0),  # from image metadata, isotropic spacing
                     mode=("bilinear", "nearest")
                 ),
+                transform if transform else Identity(),  # add the optional transform (if exists)
             ]
         )
+        self.root = root  # root path
+        self.id_to_label = {  # dataset labels in text
+            0: "GTVp",
+            1: "GTVn",
+        }
 
-    def __getitem__(self, i):
-        data = self.load_transform(self.index[i])
-        if self.transform:
-            data = self.transform(data)
-        return data
+        # Apply the super-class functionality
+        super().__init__(self.index, full_transform, num_workers=None)
 
     def __len__(self):
         return self.index.__len__()
 
+
 if __name__ == "__main__":
-    dataset = HNTSDataset("data/train")
-    print(dataset[0])
+    from tqdm import tqdm
+
+    dataset = HNTSDataset("data/test")
+    for i in tqdm(range(len(dataset))):
+        _ = dataset[i]
