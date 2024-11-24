@@ -7,17 +7,21 @@ from monai.transforms import (
     MapTransform,
     LoadImaged,
     SelectItemsd,
-    EnsureChannelFirstd, Orientationd, Spacingd, Identity, )
+    EnsureChannelFirstd,
+    Orientationd,
+    Spacingd,
+    Identity,
+)
 
 
-def create_dataset_dicts(root_data) -> list[dict[str, str]]:
+def create_dataset_dicts(root_data, include_midRT=False) -> list[dict[str, str]]:
     data_dicts = []
     for root, _, files in sorted(os.walk(root_data)):
 
         # This is a folder with files (duh)
-        if "preRT" in root and len(files) > 0:
-            mask = [f for f in files if "_preRT_mask.nii.gz" in f][0]
-            imag = [f for f in files if "_preRT_T2.nii.gz" in f][0]
+        if len(files) > 0 and ("preRT" in root or (include_midRT and "midRT" in root)):
+            mask = [f for f in files if "_mask.nii.gz" in f][0]
+            imag = [f for f in files if "_T2.nii.gz" in f][0]
             data_dicts.append(
                 {
                     "image": str(os.path.join(root, imag)),
@@ -47,8 +51,8 @@ class HNTSDataset(CacheDataset):
     except from the background label (0) which is ignored. GTVp is at channel 0, GTVn at channel 1.
     """
 
-    def __init__(self, root, transform=None):
-        self.index = create_dataset_dicts(root)
+    def __init__(self, root, transform=None, include_midRT=False):
+        self.index = create_dataset_dicts(root, include_midRT)
         full_transform = Compose(
             [
                 LoadImaged(keys=["image", "mask"]),
@@ -59,9 +63,11 @@ class HNTSDataset(CacheDataset):
                 Spacingd(
                     keys=["image", "mask"],
                     pixdim=(1.0, 1.0, 1.0),  # from image metadata, isotropic spacing
-                    mode=("bilinear", "nearest")
+                    mode=("bilinear", "nearest"),
                 ),
-                transform if transform else Identity(),  # add the optional transform (if exists)
+                (
+                    transform if transform else Identity()
+                ),  # add the optional transform (if exists)
             ]
         )
         self.root = root  # root path
