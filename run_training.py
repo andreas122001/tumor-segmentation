@@ -56,9 +56,9 @@ if not args.no_training:
     train_transforms = monai.transforms.Compose(
         [
             # Normalization and cropping
-        monai.transforms.RandSpatialCropd(
-            keys=["image", "mask"], roi_size=[224, 224, 96], random_size=False
-        ),
+            monai.transforms.RandSpatialCropd(
+                keys=["image", "mask"], roi_size=[224, 224, 96], random_size=False
+            ),
             monai.transforms.RandFlipd(
                 keys=["image", "mask"], prob=0.5, spatial_axis=0
             ),

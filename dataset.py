@@ -42,7 +42,7 @@ class ConvertLabelIdToChannel(MapTransform):
     def __call__(self, data):
         d = dict(data)
         for key in self.keys:
-            result = [d[key] == 0, d[key] == 1, d[key] == 2]
+            result = [d[key] == 1, d[key] == 2]
             d[key] = torch.stack(result, dim=0).float()
         return d
 
