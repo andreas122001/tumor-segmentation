@@ -36,7 +36,8 @@ def create_dataset_dicts(root_data, include_midRT=False) -> list[dict[str, str]]
 
 class ConvertLabelIdToChannel(MapTransform):
     """
-    Transform to separate the labels into each of their own channel
+    Transform to separate the labels into each of their own channel. 
+    Reference: https://colab.research.google.com/github/wandb/examples/blob/master/colabs/monai/3d_brain_tumor_segmentation.ipynb
     """
 
     def __call__(self, data):
