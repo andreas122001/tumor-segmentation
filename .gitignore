@@ -6,6 +6,7 @@ venv
 1.2.0
 logs
 runs
+predictions
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
