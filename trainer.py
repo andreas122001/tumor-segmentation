@@ -1,11 +1,13 @@
 import os
+import time
 from matplotlib import pyplot as plt
 import monai
 import torch
 from tqdm import tqdm
 from scipy.signal import savgol_filter
 import imageio
-
+from matplotlib import colors
+from definitions.colors import GTVp_col, GTVn_col
 
 from torch.utils.tensorboard import SummaryWriter
 from monai.inferers import sliding_window_inference
@@ -52,7 +54,10 @@ class MedSegTrainer:
         self.save_path = f"{self.log_path}/checkpoints"
         self.config = config
 
+        os.makedirs(self.save_path, exist_ok=True)
+
     def fit(self, train_loader: torch.utils.data.DataLoader):
+        print("=== Starting training! ===")
         self.model.to(self.device)
         self.model.train()
         for e in range(self.epoch, self.epochs):
@@ -63,9 +68,18 @@ class MedSegTrainer:
                 self.writer.add_scalar("training_loss", loss, self.step, new_style=True)
                 self.losses.append(loss)
                 epoch_loss += loss
-            self.lr_scheduler.step()
+            # After epoch
+            if self.lr_scheduler:
+                self.lr_scheduler.step()
             self.writer.add_scalar(
-                "learning_rate", self.lr_scheduler.get_last_lr()[0], self.step, new_style=True
+                "learning_rate",
+                (
+                    self.lr_scheduler.get_last_lr()[0]
+                    if self.lr_scheduler
+                    else self.optimizer.param_groups[0]["lr"]
+                ),
+                self.step,
+                new_style=True,
             )
             if self.save_every != -1 and (e + 1) % self.save_every == 0:
                 self.save_checkpoint()
@@ -101,7 +115,7 @@ class MedSegTrainer:
         self.model.eval()
         with torch.no_grad():
             metric_results = {}
-            for batch in tqdm(test_loader, desc="Testing steps", leave=False):
+            for batch in tqdm(test_loader, desc="Testing steps", leave=True):
                 inputs, targets = self._unpack_batch(batch)
 
                 preds = self.inference(inputs)
@@ -121,14 +135,26 @@ class MedSegTrainer:
             else:
                 metric_results[name] = aggregate.item()
             metric.reset()
-            self.writer.add_scalar(f"test/{name}", metric_results[name], global_step=self.step, new_style=True)
+
+        # Write to tensorboard
+        for name, val in metric_results.items():
+            self.writer.add_scalar(
+                f"test/{name}",
+                val,
+                global_step=self.step,
+                new_style=True,
+            )
 
         self.writer.add_hparams(
-            run_name=".", hparam_dict=self.config, metric_dict=metric_results, global_step=self.step
+            run_name=".",
+            hparam_dict=self.config,
+            metric_dict=metric_results,
+            global_step=self.step,
         )
         return metric_results
 
-    def inference(self, input_):
+    def inference(self, input_, raw=False):
+        self.model.eval()
         self.model.to(self.device)
 
         def _compute(input_):
@@ -140,38 +166,56 @@ class MedSegTrainer:
                 overlap=0.2,
             )
 
-        # with torch.amp.autocast("cuda"):
-        post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
-        return post_trans(_compute(input_.to(self.device)))
+        with torch.no_grad():
+            if raw:
+                return _compute(input_.to(self.device))
+
+            post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
+            return post_trans(_compute(input_.to(self.device)))
 
     def create_prediction_slider_and_video(self, sample):
         image = sample["image"]
         mask_target = sample["mask"]
         mask_pred = self.inference(image.unsqueeze(0))[0].cpu()
 
-        image = monai.transforms.Orientation(axcodes="SPL")(image)
-        mask_target = monai.transforms.Orientation(axcodes="SPL")(mask_target)
-        mask_pred = monai.transforms.Orientation(axcodes="SPL")(mask_pred)
+        to_spl = monai.transforms.Orientation(axcodes="SPL")
+        image = to_spl(image)
+        mask_target = to_spl(mask_target)
+        mask_pred = to_spl(mask_pred)
 
-        write_dir = f"{self.save_path}/prediction_slices"
+        write_dir = f"{self.log_path}/prediction_slices"
         os.makedirs(f"{write_dir}", exist_ok=True)
         title = ["Prediction", "Target"]
-        for slice_idx in mask_target.shape[1]:
+        for slice_idx in tqdm(
+            range(mask_target.shape[1]), desc="Creatig prediction slices"
+        ):
             image_slice = image[0, slice_idx]
             label0 = [mask_pred[0, slice_idx], mask_target[0, slice_idx]]
             label1 = [mask_pred[1, slice_idx], mask_target[1, slice_idx]]
-            fig, axs = plt.subplots(1, 2, figsize=(16, 8))
+            fig, axs = plt.subplots(1, 2, figsize=(8, 4))
             for i in range(2):
                 axs[i].imshow(image_slice, cmap="gray", alpha=1.0)
-                axs[i].imshow(label0[i], cmap="Reds", alpha=0.3)
-                axs[i].imshow(label1[i], cmap="plasma", alpha=0.3)
+                axs[i].imshow(
+                    label0[i],
+                    cmap=colors.ListedColormap(["white", GTVp_col]),
+                    alpha=0.5,
+                )
+                axs[i].imshow(
+                    label1[i],
+                    cmap=colors.ListedColormap(["white", GTVn_col]),
+                    alpha=0.5,
+                )
                 axs[i].set_title(title[i])
                 axs[i].axis("off")
-            plt.tight_layout()
-            plt.savefig(f"{write_dir}/pred_vs_target_{slice_idx}.png")
+            fig.tight_layout()
+            fig.savefig(f"{write_dir}/{slice_idx:04d}.png")
             self.writer.add_figure("prediction_vs_target", fig, global_step=slice_idx)
-        frames = [imageio.imread(f) for f in os.listdir(f"{write_dir}")]
-        imageio.mimsave(f"{self.save_path}/slices.gif", frames, fps=(10))
+        frames = [
+            imageio.imread(os.path.join(write_dir, f))
+            for f in sorted(os.listdir(write_dir))
+        ]
+        print("Generating GIF...")
+        imageio.mimsave(f"{self.log_path}/slices.gif", frames, format="GIF", fps=10)
 
     def log_loss_plot(self):
         if len(self.losses) > 0:
@@ -206,16 +250,20 @@ class MedSegTrainer:
         )
 
     def load_checkpoint(self, checkpoint_path):
+        trainer_state_dict: dict = torch.load(f"{checkpoint_path}/trainer_state.pth")
+        self.step = trainer_state_dict.get("step", 0)
+        self.losses = trainer_state_dict.get("losses", [])
+        self.epoch = trainer_state_dict.get("epoch", 0)
+
         self.model.load_state_dict(torch.load(f"{checkpoint_path}/model.pth"))
         self.optimizer.load_state_dict(torch.load(f"{checkpoint_path}/optimizer.pth"))
         if self.lr_scheduler:
             self.lr_scheduler.load_state_dict(
                 torch.load(f"{checkpoint_path}/lr_scheduler.pth")
             )
-        trainer_state_dict: dict = torch.load(f"{checkpoint_path}/trainer_state.pth")
-        self.step = trainer_state_dict.get("step", 0)
-        self.losses = trainer_state_dict.get("losses", [])
-        self.epoch = trainer_state_dict.get("epoch", 0)
+
+            self.lr_scheduler.T_max = self.epochs
+            self.lr_scheduler.last_epoch = self.epoch
 
     def _unpack_batch(
         self, batch: dict[str, torch.Tensor]

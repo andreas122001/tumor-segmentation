@@ -8,7 +8,7 @@ models = {
             "spatial_dims": 3,
             "in_channels": 1,
             "out_channels": 2,
-            "channels": (1, 1, 1, 1),
+            "channels": (32, 64, 128, 256),
             "strides": (2, 2, 2),
             "num_res_units": 2,
         },
@@ -44,8 +44,14 @@ models = {
             "out_channels": 2,
             "img_size": (224, 224, 96),
             "spatial_dims": 3,
-            "use_checkpoint": False,
-            "use_v2": True,
+            "use_checkpoint": True,
+            "use_v2": False,
+            "num_heads": (3, 6, 12, 24),
+            "drop_rate": 0.2
         },
     ),
 }
+
+def get_model(option):
+    model_class, model_args = models[option]
+    return model_class(**model_args)

@@ -15,6 +15,7 @@ from monai.transforms import (
 
 
 def create_dataset_dicts(root_data, include_midRT=False) -> list[dict[str, str]]:
+    """Construct the dataset dicts for the MONAI dataset"""
     data_dicts = []
     for root, _, files in sorted(os.walk(root_data)):
 
@@ -26,6 +27,7 @@ def create_dataset_dicts(root_data, include_midRT=False) -> list[dict[str, str]]
                 {
                     "image": str(os.path.join(root, imag)),
                     "mask": str(os.path.join(root, mask)),
+                    "id": str(root.split("/")[-2]),
                 }
             )
 
@@ -40,7 +42,7 @@ class ConvertLabelIdToChannel(MapTransform):
     def __call__(self, data):
         d = dict(data)
         for key in self.keys:
-            result = [d[key] == 1, d[key] == 2]
+            result = [d[key] == 0, d[key] == 1, d[key] == 2]
             d[key] = torch.stack(result, dim=0).float()
         return d
 
@@ -56,7 +58,6 @@ class HNTSDataset(CacheDataset):
         full_transform = Compose(
             [
                 LoadImaged(keys=["image", "mask"]),
-                SelectItemsd(keys=["image", "mask"]),
                 ConvertLabelIdToChannel(keys="mask"),
                 EnsureChannelFirstd(keys=["image"]),
                 Orientationd(keys=["image", "mask"], axcodes="RAS"),
@@ -65,7 +66,7 @@ class HNTSDataset(CacheDataset):
                     pixdim=(1.0, 1.0, 1.0),  # from image metadata, isotropic spacing
                     mode=("bilinear", "nearest"),
                 ),
-                (
+                Compose(
                     transform if transform else Identity()
                 ),  # add the optional transform (if exists)
             ]
